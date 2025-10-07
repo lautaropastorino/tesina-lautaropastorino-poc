@@ -1,0 +1,127 @@
+services:
+
+### kafka ###############################################################################################
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_KRAFT_MODE: "true"
+      KAFKA_PROCESS_ROLES: controller,broker
+      KAFKA_NODE_ID: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      CLUSTER_ID: "Mk3OEYBSD34fcwNTJENDM2Qk"
+    healthcheck:
+      test: ["CMD", "/bin/kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+  
+  connect:
+    image: confluentinc/cp-kafka-connect:latest
+    container_name: connect
+    depends_on:
+      - kafka
+    ports:
+      - 8083:8083
+    env_file:
+        - ./.env
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: 'kafka:9092'
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: compose-connect-group
+      CONNECT_CONFIG_STORAGE_TOPIC: docker-connect-configs
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_FLUSH_INTERVAL_MS: 10000
+      CONNECT_OFFSET_STORAGE_TOPIC: docker-connect-offsets
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_TOPIC: docker-connect-status
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_INTERNAL_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_INTERNAL_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components/,/plugins"
+      CONNECT_LOG4J_ROOT_LOGLEVEL: "INFO"
+    volumes:
+      - ./plugins:/plugins
+    healthcheck:
+      test: ["CMD", "curl", "http://localhost:8083/connectors"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+  
+  akhq:
+    image: tchiotludo/akhq:latest
+    container_name: akhq
+    ports:
+      - 8000:8080
+    depends_on:
+      - kafka
+    env_file:
+      - ./.env
+    environment:
+      AKHQ_CONFIGURATION: |
+        akhq:
+          connections:
+            docker-kafka-server:
+              properties:
+                bootstrap.servers: "kafka:9092"
+              schema-registry:
+                url: "https://glue.us-east-1.amazonaws.com"
+                type: "glue"
+                glueSchemaRegistryName: "concentrador-tx"
+                awsRegion: "us-east-1"
+              connect:
+                - name: "connect"
+                  url: "http://connect:8083"
+
+### Open Search ##########################################################################################
+
+  opensearch:
+    image: opensearchproject/opensearch:2.3.0 
+    container_name: opensearch
+    ports:
+      - 9200:9200
+    environment:
+      - cluster.name=opensearch-cluster
+      - node.name=opensearch
+      - discovery.seed_hosts=opensearch
+      - cluster.initial_cluster_manager_nodes=opensearch
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "DISABLE_INSTALL_DEMO_CONFIG=true"
+      - "DISABLE_SECURITY_PLUGIN=true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536 
+        hard: 65536
+    healthcheck:
+      test: ["CMD", "curl", "http://localhost:9200/_cluster/health"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+  
+  ### Gatling tests ##########################################################################################
+
+  gatling:
+    image: lautaropastorino/gatling-kafka-avro:1.2
+    container_name: gatling
+    env_file:
+      - ./.env
+    profiles:
+      - tools
+    network_mode: "host"
+  
