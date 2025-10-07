@@ -3,7 +3,7 @@
 is_healthy() {
     local container_name=$1
     
-    printf "Esperando que $container_name este listo"
+    echo -e "\nEsperando que $container_name este listo"
 
     while true; do
         status=$(docker inspect --format='{{.State.Health.Status}}' "$container_name")
@@ -15,34 +15,50 @@ is_healthy() {
         sleep 5
     done
     
-    printf "$container_name está listo"
+    echo -e "\n$container_name está listo"
 }
+
+envFile=".env"
+
+if [ ! -f "$envFile" ]; then
+    echo -e "Error: No se encontro el archivo $envFile"
+    exit 1
+fi
+
+echo -e "\nCargando variables de entorno desde $envFile..."
+
+set -a
+source "$envFile"
+set +a
+
+echo -e "\nVariables cargadas exitosamente!"
 
 sudo sysctl -w vm.max_map_count=262144
 
-printf "Creando contenedores"
+echo -e "\nCreando contenedores"
 
 docker-compose up -d --force-recreate -V
 
 is_healthy "kafka"
 
-printf "Creando tópico transactions"
+echo -e "\nCreando tópico $TOPIC"
 
-docker exec kafka /bin/kafka-topics --bootstrap-server localhost:9092 --create --topic avro-transactions
+docker exec kafka /bin/kafka-topics --bootstrap-server $KAFKA_BROKERS --create --topic $TOPIC
 
 is_healthy "opensearch"
 
-printf "Creando index template"
+echo -e "\nCreando index template"
 
-curl --location --request PUT 'localhost:9200/_index_template/avro-transactions' \
+curl --location --request PUT "localhost:9200/_index_template/$TOPIC" \
 --header 'Content-Type: application/json' \
---data '{
+--data @- <<EOF | jq .
+{
     "index_patterns": [
-        "avro-transactions-*"
+        "$TOPIC-*"
     ],
     "template": {
         "aliases": {
-            "avro-transactions": {}
+            "$TOPIC": {}
         },
         "settings": {
             "number_of_shards": 1,
@@ -62,18 +78,19 @@ curl --location --request PUT 'localhost:9200/_index_template/avro-transactions'
             }
         }
     }
-}' | jq .
+}
+EOF
 
 is_healthy "connect"
 
-printf "Creando conector"
+echo -e "\nCreando conector"
 
 curl -X POST -H "Content-Type: application/json" --data "{
     \"name\": \"opensearch-sink-connector\",
     \"config\": {
       \"connector.class\": \"io.aiven.kafka.connect.opensearch.OpensearchSinkConnector\",
       \"tasks.max\": \"1\",
-      \"topics\": \"avro-transactions\",
+      \"topics\": \"$TOPIC\",
       \"key.converter\": \"org.apache.kafka.connect.storage.StringConverter\",
 
       \"value.converter\": \"com.amazonaws.services.schemaregistry.kafkaconnect.AWSKafkaAvroConverter\",
@@ -107,7 +124,7 @@ curl -X POST -H "Content-Type: application/json" --data "{
     }
   }" http://localhost:8083/connectors  | jq .
 
-printf "Escribiendo en el topico"
+echo -e "\nEscribiendo en el topico"
 
 docker-compose run --rm gatling
 
@@ -115,4 +132,4 @@ curl -X GET -H "Content-Type: application/json" --data '{
     "query": {
       "match_all": {}
     }
-  }' http://localhost:9200/avro-transactions/_search  | jq .
+  }' "http://localhost:9200/$TOPIC/_search"  | jq .

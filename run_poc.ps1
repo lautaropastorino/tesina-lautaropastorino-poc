@@ -3,8 +3,7 @@ function is-healthy {
         [string]$ContainerName
     )
 
-    echo "Esperando que $ContainerName este listo"
-    echo ""
+    Write-Host "`nEsperando que $ContainerName este listo"
 
     do {
         $status = docker inspect --format='{{.State.Health.Status}}' $ContainerName
@@ -13,9 +12,30 @@ function is-healthy {
         }
     } while ($status -ne "healthy")
 
-    echo "$ContainerName esta listo"
-    echo ""
+    Write-Host "`n$ContainerName esta listo"
 }
+
+$envFile = ".env"
+
+if (-not (Test-Path $envFile)) {
+    Write-Host "Error: No se encontro el archivo $envFile"
+    exit 1
+}
+
+Write-Host "Cargando variables de entorno desde $envFile..."
+
+Get-Content $envFile | ForEach-Object {
+    $line = $_.Trim()
+    
+    $parts = $line -split '=', 2
+
+    $key = $parts[0].Trim()
+    $value = $parts[1].Trim()
+        
+    [Environment]::SetEnvironmentVariable($key, $value, "Process")
+}
+
+Write-Host "`nVariables cargadas exitosamente!"
 
 $distros = wsl -l -q
 $target = $null
@@ -33,7 +53,7 @@ if ($target -eq $null) {
     exit 1
 }
 
-echo "Creando contenedores"
+Write-Host "`nCreando contenedores"
 
 wsl -d $target sh -c "sysctl -w vm.max_map_count=262144"
 
@@ -41,23 +61,24 @@ docker-compose up -d --force-recreate -V
 
 is-healthy -ContainerName kafka
 
-echo "Creando topico transactions"
+Write-Host "`nCreando topico $env:TOPIC"
 
-docker exec kafka /bin/kafka-topics --bootstrap-server localhost:9092 --create --topic avro-transactions
+docker exec kafka /bin/kafka-topics --bootstrap-server $env:KAFKA_BROKERS --create --topic $env:TOPIC
 
 is-healthy -ContainerName opensearch
 
-echo "Creando index template"
+Write-Host "`nCreando index template"
 
-Invoke-WebRequest -Method PUT -Uri 'http://localhost:9200/_index_template/avro-transactions' `
+Invoke-WebRequest -Method PUT -Uri "http://localhost:9200/_index_template/$env:TOPIC" `
 -ContentType "application/json" `
--Body '{
+-Body @"
+{
     "index_patterns": [
-        "avro-transactions-*"
+        "$env:TOPIC-*"
     ],
     "template": {
         "aliases": {
-            "avro-transactions": {}
+            "$env:TOPIC": {}
         },
         "settings": {
             "number_of_shards": 1,
@@ -77,18 +98,19 @@ Invoke-WebRequest -Method PUT -Uri 'http://localhost:9200/_index_template/avro-t
             }
         }
     }
-}' | ConvertFrom-Json | ConvertTo-Json -Depth 10
+}
+"@ | ConvertFrom-Json | ConvertTo-Json -Depth 10
 
 is-healthy -ContainerName connect
 
-echo "Creando conector"
+Write-Host "`nCreando conector"
 
 $config  = @{
   "name" = "opensearch-sink-connector" 
     "config" = @{
       "connector.class" = "io.aiven.kafka.connect.opensearch.OpensearchSinkConnector" 
       "tasks.max" = "1" 
-      "topics" = "avro-transactions" 
+      "topics" = "$env:TOPIC" 
       "key.converter" = "org.apache.kafka.connect.storage.StringConverter" 
 
       "value.converter" = "com.amazonaws.services.schemaregistry.kafkaconnect.AWSKafkaAvroConverter" 
@@ -126,13 +148,13 @@ $body  = $config | ConvertTo-Json -Compress
 
 Invoke-WebRequest -Method POST -Uri http://localhost:8083/connectors -ContentType "application/json" -Body $body | ConvertFrom-Json | ConvertTo-Json -Depth 10
 
-echo "Escribiendo en el tópico"
+Write-Host "`nEscribiendo en el tópico"
 
 docker-compose run --rm gatling
 
-echo "Obteniendo transacciones desde Open Search"
+Write-Host "`nObteniendo transacciones desde Open Search"
 
-Invoke-WebRequest -Method POST -Uri http://localhost:9200/avro-transactions/_search `
+Invoke-WebRequest -Method POST -Uri "http://localhost:9200/$env:TOPIC/_search" `
 -ContentType "application/json" `
 -Body '{
     "query": { 
